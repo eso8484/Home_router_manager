@@ -1,0 +1,60 @@
+🔐 Logging into ZLT X20 router...
+🌐 Getting initial session...
+   Initial session cookie: none
+
+🔐 Trying plain password hash...
+   Response not JSON: 
+
+🔐 Trying md5 password hash...
+   Response not JSON: 
+
+🔐 Trying sha256 password hash...
+   Response not JSON: 
+
+❌ All login attempts failed
+
+⚠️  Could not authenticate, will use network scan
+
+📡 Taking initial snapshot...
+📡 Using network scan to discover devices...
+   🔍 Scanning local network...
+   ✅ Found 5 devices on network
+✅ Found 5 devices
+   - Esos-iPhone (A8:91:3D:A4:89:D1) - 192.168.0.135
+🟢 JOINED [❓ UNKNOWN]: Esos-iPhone | 192.168.0.135 | A8:91:3D:A4:89:D1
+   - DESKTOP-EDNNIAO (28:16:AD:F0:76:34) - 192.168.0.138
+🟢 JOINED [❓ UNKNOWN]: DESKTOP-EDNNIAO | 192.168.0.138 | 28:16:AD:F0:76:34
+   - Abdullahi-Mrs (B4:19:74:67:71:5F) - 192.168.0.155
+🟢 JOINED [❓ UNKNOWN]: Abdullahi-Mrs | 192.168.0.155 | B4:19:74:67:71:5F
+   - JP1 (6A:46:94:FE:3E:1B) - 192.168.0.164
+🟢 JOINED [❓ UNKNOWN]: JP1 | 192.168.0.164 | 6A:46:94:FE:3E:1B
+   - ESO (98:54:1B:F9:E6:CE) - 192.168.0.100
+🟢 JOINED [❓ UNKNOWN]: ESO | 192.168.0.100 | 98:54:1B:F9:E6:CE
+
+🟢 Monitoring started. Scanning every 30 seconds.
+
+   🔍 Scanning local network...
+   ✅ Found 5 devices on network
+📊 Currently tracking 5 devices
+   🔍 Scanning local network...
+   ✅ Found 5 devices on network
+📊 Currently tracking 5 devices
+   🔍 Scanning local network...
+   ✅ Found 5 devices on network
+📊 Currently tracking 5 devices
+   🔍 Scanning local network...
+   ✅ Found 5 devices on network
+📊 Currently tracking 5 devices
+   🔍 Scanning local network...
+   ✅ Found 5 devices on network
+📊 Currently tracking 5 devices
+   🔍 Scanning local network...
+   ✅ Found 5 devices on network
+📊 Currently tracking 5 devices
+   🔍 Scanning local network...
+   ✅ Found 5 devices on network
+📊 Currently tracking 5 devices
+   🔍 Scanning local network...
+   ❌ ARP scan failed: Unable to read ARP table
+   ✅ Found 0 devices on network
+⚠️  Scan returned no devices, keeping previous snapshot

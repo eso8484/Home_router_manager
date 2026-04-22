@@ -7,6 +7,8 @@ import re as re_module
 import subprocess
 import socket
 import threading
+import platform
+from concurrent.futures import ThreadPoolExecutor
 import requests
 from datetime import datetime
 import net_blocker
@@ -29,12 +31,57 @@ INTERVAL       = int(os.getenv("MONITOR_INTERVAL", "30"))
 TRUSTED_FILE   = os.getenv("TRUSTED_FILE", "trusted_devices.json")
 GATEWAY        = os.getenv("GATEWAY_IP", "192.168.0.1")
 NETWORK_SUBNET = os.getenv("NETWORK_SUBNET", "192.168.0")
+DEVICE_NAME_FILE = os.getenv("DEVICE_NAME_FILE", "device_names.json")
 
 # ── OpenRouter AI Config (optional, for natural language) ─
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL   = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
 
 session = requests.Session()
+
+
+def _is_wsl():
+    """Return True when running inside Windows Subsystem for Linux."""
+    return "microsoft" in platform.release().lower() or bool(os.getenv("WSL_INTEROP"))
+
+
+def _win_cmd(name):
+    """Use .exe command names from WSL, plain names on Windows."""
+    return f"{name}.exe" if _is_wsl() else name
+
+
+def _get_windows_arp_output():
+    """Fetch Windows ARP table with retry/fallback to avoid transient timeouts."""
+    last_err = None
+
+    for timeout_secs in (10, 20):
+        try:
+            result = subprocess.run(
+                [_win_cmd("arp"), "-a"],
+                capture_output=True,
+                text=True,
+                timeout=timeout_secs
+            )
+            if result.stdout:
+                return result.stdout
+        except Exception as e:
+            last_err = e
+
+    # In WSL, cmd.exe sometimes executes Windows CLI more reliably.
+    if _is_wsl():
+        try:
+            result = subprocess.run(
+                ["cmd.exe", "/C", "arp -a"],
+                capture_output=True,
+                text=True,
+                timeout=20
+            )
+            if result.stdout:
+                return result.stdout
+        except Exception as e:
+            last_err = e
+
+    raise RuntimeError(last_err) if last_err else RuntimeError("Unable to read ARP table")
 
 # ── Authentication for ZLT X20 ───────────────────────────
 def login():
@@ -174,48 +221,36 @@ def get_devices(session_id):
 
 # ── Network Scanner (replaces hardcoded fallback) ────────
 def ping_host(ip):
-    """Ping a single host to populate ARP table (Windows)"""
+    """Ping a single host to populate neighbor table."""
     try:
-        subprocess.run(
-            ["ping", "-n", "1", "-w", "500", ip],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=3
-        )
+        if platform.system().lower().startswith("win") or _is_wsl():
+            cmd = [_win_cmd("ping"), "-n", "1", "-w", "500", ip]
+        else:
+            cmd = ["ping", "-c", "1", "-W", "1", ip]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
     except:
         pass
 
-def scan_network(subnet=NETWORK_SUBNET):
-    """Scan local network by pinging subnet then reading ARP table"""
-    print("   🔍 Scanning local network...")
 
-    # Step 1: Ping sweep to populate ARP table with all active hosts
-    threads = []
-    for i in range(2, 255):  # skip .0 and .1 (gateway)
-        ip = f"{subnet}.{i}"
-        t = threading.Thread(target=ping_host, args=(ip,), daemon=True)
-        threads.append(t)
-        t.start()
+def _ping_sweep_subnet(subnet, max_workers=32):
+    """Populate neighbor cache with bounded parallel pings."""
+    ips = [f"{subnet}.{i}" for i in range(2, 255)]
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        list(pool.map(ping_host, ips))
 
-    # Wait for pings to finish
-    for t in threads:
-        t.join(timeout=3)
-
-    # Step 2: Read the ARP table
+def _scan_network_windows(subnet):
+    """Windows scanner using arp/getmac/ipconfig."""
     try:
-        result = subprocess.run(
-            ["arp", "-a"],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        arp_output = result.stdout
+        arp_output = _get_windows_arp_output()
     except Exception as e:
-        print(f"   ❌ ARP scan failed: {e}")
-        return {}
+        print(f"   ⚠️ ARP read failed: {e}; warming cache and retrying once...")
+        _ping_sweep_subnet(subnet, max_workers=16 if _is_wsl() else 32)
+        try:
+            arp_output = _get_windows_arp_output()
+        except Exception as e2:
+            print(f"   ❌ ARP scan failed: {e2}")
+            return {}
 
-    # Step 3: Parse ARP output
-    # Windows format: "  192.168.0.100       98-54-1b-f9-e6-ce     dynamic"
     devices = {}
     arp_pattern = r'(\d+\.\d+\.\d+\.\d+)\s+([\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2})\s+(\w+)'
 
@@ -224,22 +259,18 @@ def scan_network(subnet=NETWORK_SUBNET):
         mac = match.group(2).upper().replace("-", ":")
         entry_type = match.group(3)
 
-        # Only include dynamic entries in our subnet
-        if entry_type.lower() != "dynamic":
+        if entry_type.lower() not in ("dynamic", "static"):
             continue
         if not ip.startswith(f"{subnet}."):
             continue
 
-        # Skip gateway and broadcast
         last_octet = int(ip.split(".")[-1])
         if last_octet in (0, 1, 255):
             continue
 
-        # Skip multicast/broadcast MACs
         if mac.startswith("FF:FF") or mac.startswith("01:00") or mac.startswith("33:33"):
             continue
 
-        # Try to resolve hostname
         hostname = f"Device-{last_octet}"
         try:
             hostname = socket.gethostbyaddr(ip)[0]
@@ -252,26 +283,22 @@ def scan_network(subnet=NETWORK_SUBNET):
             "iface": "WiFi"
         }
 
-    # Step 4: Add THIS computer (it never appears in its own ARP table)
     try:
-        # Get local IP from ARP interface header: "Interface: 192.168.0.100 --- 0x5"
         iface_pattern = r'Interface:\s+(' + subnet.replace('.', r'\.') + r'\.\d+)'
         iface_match = re_module.search(iface_pattern, arp_output)
         if iface_match:
             local_ip = iface_match.group(1)
             local_mac = None
 
-            # Method 1: getmac - find the connected (non-disconnected) adapter
             try:
                 mac_result = subprocess.run(
-                    ["getmac", "/fo", "csv", "/nh", "/v"],
+                    [_win_cmd("getmac"), "/fo", "csv", "/nh", "/v"],
                     capture_output=True, text=True, timeout=5
                 )
                 for line in mac_result.stdout.strip().split("\n"):
                     line = line.strip()
                     if not line or "disconnected" in line.lower():
                         continue
-                    # Format: "Name","Description","MAC","Transport"
                     parts = line.split(",")
                     if len(parts) >= 3:
                         mac_candidate = parts[2].strip().strip('"').upper().replace("-", ":")
@@ -281,14 +308,12 @@ def scan_network(subnet=NETWORK_SUBNET):
             except:
                 pass
 
-            # Method 2: ipconfig /all - find MAC in the section containing our IP
             if not local_mac:
                 try:
                     ipconfig_result = subprocess.run(
-                        ["ipconfig", "/all"],
+                        [_win_cmd("ipconfig"), "/all"],
                         capture_output=True, text=True, timeout=5
                     )
-                    # Split into adapter sections and find the one with our IP
                     sections = ipconfig_result.stdout.split("\r\n\r\n")
                     for section in sections:
                         if local_ip in section:
@@ -311,6 +336,123 @@ def scan_network(subnet=NETWORK_SUBNET):
                 }
     except:
         pass
+
+    return devices
+
+def _scan_network_linux(subnet):
+    """Linux/WSL scanner using ip neigh."""
+    try:
+        result = subprocess.run(
+            ["ip", "neigh", "show"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        neigh_output = result.stdout
+    except Exception as e:
+        print(f"   ❌ Neighbor scan failed (ip neigh): {e}")
+        return {}
+
+    devices = {}
+    # Example: 192.168.0.12 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE
+    neigh_pattern = r'(\d+\.\d+\.\d+\.\d+)\s+dev\s+(\S+)(?:\s+lladdr\s+([0-9a-fA-F:]{17}))?\s+(\S+)'
+
+    for match in re_module.finditer(neigh_pattern, neigh_output):
+        ip = match.group(1)
+        iface = match.group(2)
+        mac = (match.group(3) or "").upper()
+        state = match.group(4).upper()
+
+        if not ip.startswith(f"{subnet}."):
+            continue
+        if not mac or state in ("FAILED", "INCOMPLETE"):
+            continue
+
+        last_octet = int(ip.split(".")[-1])
+        if last_octet in (0, 1, 255):
+            continue
+
+        hostname = f"Device-{last_octet}"
+        try:
+            hostname = socket.gethostbyaddr(ip)[0]
+        except:
+            pass
+
+        devices[mac] = {
+            "ip": ip,
+            "hostname": hostname,
+            "iface": iface
+        }
+
+    return devices
+
+
+
+
+def _load_device_name_overrides():
+    """Load optional name overrides from JSON mapping by MAC/IP key."""
+    try:
+        if not os.path.exists(DEVICE_NAME_FILE):
+            return {}
+        with open(DEVICE_NAME_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _apply_device_name_overrides(devices):
+    """Apply overrides where keys match device key or IP."""
+    overrides = _load_device_name_overrides()
+    if not overrides:
+        return devices
+
+    for key, info in devices.items():
+        ip = info.get("ip")
+        if key in overrides and overrides[key]:
+            info["hostname"] = str(overrides[key])
+        elif ip in overrides and overrides[ip]:
+            info["hostname"] = str(overrides[ip])
+    return devices
+
+
+def _snapshot_by_ip(snapshot):
+    """Create ip->(device_key, info) map to stabilize join/leave logic."""
+    ip_map = {}
+    for key, info in snapshot.items():
+        ip = info.get("ip")
+        if ip:
+            ip_map[ip] = (key, info)
+    return ip_map
+
+def scan_network(subnet=NETWORK_SUBNET):
+    """Scan local network by pinging subnet then reading ARP table"""
+    print("   🔍 Scanning local network...")
+
+    # Step 1: Read neighbor table in an OS-specific way.
+    if platform.system().lower().startswith("win") or _is_wsl():
+        devices = _scan_network_windows(subnet)
+
+        # On WSL/Windows ARP can be sparse until hosts are actively probed.
+        if len(devices) <= 1:
+            print("   ⚠️ Low device count from ARP cache, running active ping sweep...")
+            workers = 24 if _is_wsl() else 48
+            _ping_sweep_subnet(subnet, max_workers=workers)
+            devices = _scan_network_windows(subnet)
+    else:
+        # Keep Linux behavior: warm neighbor cache then read ip neigh.
+        threads = []
+        for i in range(2, 255):
+            ip = f"{subnet}.{i}"
+            t = threading.Thread(target=ping_host, args=(ip,), daemon=True)
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join(timeout=3)
+
+        devices = _scan_network_linux(subnet)
+
+    devices = _apply_device_name_overrides(devices)
 
     print(f"   ✅ Found {len(devices)} devices on network")
     return devices
@@ -679,15 +821,25 @@ if __name__ == "__main__":
                 current_snapshot = scan_network()
             
             if current_snapshot:
+                prev_by_ip = _snapshot_by_ip(previous_snapshot)
+                curr_by_ip = _snapshot_by_ip(current_snapshot)
+                joined_ips = []
+                left_ips = []
+
                 # Devices that JOINED (or re-joined)
-                for mac, info in current_snapshot.items():
-                    if mac not in previous_snapshot:
-                        send_join_alert(mac, info, trusted)
-                
+                for ip, (dev_key, info) in curr_by_ip.items():
+                    if ip not in prev_by_ip:
+                        joined_ips.append(ip)
+                        send_join_alert(dev_key, info, trusted)
+
                 # Devices that LEFT
-                for mac, info in previous_snapshot.items():
-                    if mac not in current_snapshot:
-                        send_leave_alert(mac, info, trusted)
+                for ip, (dev_key, info) in prev_by_ip.items():
+                    if ip not in curr_by_ip:
+                        left_ips.append(ip)
+                        send_leave_alert(dev_key, info, trusted)
+
+                if joined_ips or left_ips:
+                    print(f"📉 Delta joined={joined_ips} left={left_ips}")
                 
                 previous_snapshot = current_snapshot
                 print(f"📊 Currently tracking {len(previous_snapshot)} devices")

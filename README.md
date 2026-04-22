@@ -84,6 +84,17 @@ Start the monitor:
 
 python router_monitor.py
 
+Run in background manually:
+
+For Linux/WSL:
+
+./run_monitor.sh
+
+This writes runtime files in the project folder:
+
+- monitor.pid
+- monitor.log
+
 What it does on startup:
 
 - Tries router login and API-based device discovery
@@ -123,6 +134,43 @@ Issue: blocker not working
 
 - Install scapy and Npcap
 - Run terminal with admin privileges when required
+
+Issue: process management
+
+- Check running process: ps -fp "$(cat monitor.pid)"
+- View logs: tail -f monitor.log
+- Stop process: kill "$(cat monitor.pid)"
+
+## Autostart On Windows Login (Recommended)
+
+Use a Windows Scheduled Task to launch the WSL monitor path at login.
+
+Files used:
+
+- run_monitor.sh
+- install_autostart_task.ps1
+- remove_autostart_task.ps1
+
+Install task from PowerShell (Run as Administrator):
+
+Set-ExecutionPolicy -Scope Process Bypass
+cd C:\Users\enejo\Downloads\monitors_network
+.\install_autostart_task.ps1
+
+Test task immediately:
+
+schtasks /Run /TN MonitorsNetworkWSL
+
+Check running monitor from WSL:
+
+cd /mnt/c/Users/enejo/Downloads/monitors_network
+ps -fp "$(cat monitor.pid)"
+tail -f monitor.log
+
+Remove task:
+
+cd C:\Users\enejo\Downloads\monitors_network
+.\remove_autostart_task.ps1
 
 Issue: first git push helper error about HEAD
 
